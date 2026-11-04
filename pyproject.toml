@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot-voice"
+version = "0.1.0"
+description = "A sleeping voice interface with independent simulated robot jobs"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  "openai[realtime]==3.45.0", "python-dotenv>=1.1,<2", "pydantic>=2.11,<3",
+  "numpy>=2,<3", "sounddevice>=0.5,<1", "jsonschema>=4.23,<5", "tzlocal>=5,<6",
+]
+
+[project.optional-dependencies]
+vad = ["silero-vad>=6,<7"]
+keyword = ["openwakeword>=0.6,<1"]
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.11", "mypy>=1.15", "build>=1.2", "types-jsonschema"]
+
+[project.scripts]
+robot-voice = "robot_voice.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+ignore_missing_imports = true
+files = ["robot_voice"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["robot_voice"]

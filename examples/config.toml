@@ -1,0 +1,13 @@
+# All fields optional. CLI --config examples/config.toml run
+wake_phrase = "hey spot"
+wake_mode = "vad-transcribe"
+audio_mode = "half-duplex" # no barge-in; choose headphones or configured external-aec
+idle_timeout = 30
+task_hold_max_seconds = 120
+max_session_seconds = 300
+max_active_seconds = 1200
+budget_dollars = 4.5
+# timezone = "America/New_York"  # default: current system IANA zone
+# input_device = "Your OS echo-cancelled source"
+# output_device = "Your speakers"
+# hardware_rate = 48000         # input resampled statefully to 16 kHz
