@@ -1,329 +1,259 @@
 # Robot Voice
 
-A Python voice interface that **sleeps independently of its robot jobs**.
-Say “Hey Spot, pick up the red sock” in one breath, keep chatting while a simulated
-job runs, let voice time out, then wake it again with today's context.
+**Talk to a simulated robot without making its work depend on the conversation.**
 
-**This is an experimental mock-robot CLI, not a production robot controller.**
-No motors, camera, ROS, emergency stop, or autonomous physical actions are implemented.
-GPT-Live handles conversation; its managed Luna backend requests allowlisted tools;
-Python validates and runs the jobs. SQLite, not the language model, owns task state.
+Say “Hey Spot, pick up the red sock.” Ask another question while the job runs. Tell
+the voice to go to sleep without stopping the job. Wake it again and ask what happened.
 
-## What works—and what has not been proved
+This Python command-line prototype explores that separation. OpenAI handles speech
+and conversation; Python validates tool requests, runs **mock robot jobs**, and saves
+history in SQLite. There is no robot hardware, camera, ROS integration or physical
+movement. It is a prototype for experimenting with voice control, not a robot safety
+system.
 
-- Explicit configurable wake phrase: local Silero VAD → bounded OpenAI transcription.
-- The entire opening utterance goes into Live **once as text**; only later audio is
-  streamed, at microphone rate. Startup buffers are bounded; overflow fails visibly.
-- Independent simulated navigation, pickup, movement policies, expressions, task status,
-  cancellation and version-checked speed guidance. Chat does not cancel jobs.
-- Idle sleep (30s default), bounded task hold (120s), maximum session duration and
-  local estimated-cost/request/time guards. Muting **does not** stop billing.
-- Durable events, transcript fragments, usage, capped asynchronous summaries, and the
-  latest ten local-day memory slices, with an extractive fallback while summaries run.
-- Offline demo, developer tests, and explicit opt-in synthesized-audio cloud tests.
+[How it works](#how-it-works) · [Why these features exist](#why-these-features-exist) ·
+[Try it without an API key](#1-try-it-without-an-api-key) ·
+[Use your microphone](#2-use-your-microphone) · [What was tested](#what-was-tested)
 
-The paid test campaign exercised **29.87 active minutes across 15 sessions**,
-including unsuccessful diagnostic runs. A **10m32s continuous session after the pacing
-fix** and its next-wake summary recall passed on the pre-review implementation; a
-separate 381-second regression exercised independent jobs and steering/cancellation.
-The first review fixes passed **116 offline tests** and a **19-second confirmed
-cloud smoke** (pickup, idle close and summary), not another ten-minute soak.
-The final lifecycle and request-identity fixes pass **143 offline tests**; no further
-cloud smoke was run for those revisions.
-See [verification details and limitations](docs/VERIFICATION.md).
-**Microphone/speaker hardware, echo cancellation and room wake accuracy are not verified.**
-The test host has no PortAudio system library; synthetic cloud success is not a
-laptop-speaker/full-duplex acceptance result.
+## How it works
 
-[ROBOT_VOICE_PLAN.md](ROBOT_VOICE_PLAN.md) is the original design, not a list of
-hardware-tested promises. Custom acoustic “Hey Spot”, semantic addressing, WebRTC,
-vision and real robot adapters remain future work.
+![Marker-pen architecture diagram: speech passes through a wake check into a temporary cloud conversation. A Python tool gate validates requests before starting independent mock jobs. SQLite saves conversation and task history for later recall.](docs/images/architecture.png)
 
-## Quickstart (Python 3.12 recommended)
+**The important boundary: closing the voice session does not close the task runner.**
+Jobs continue only while the Python application is running. Quitting the application
+with Ctrl+C cancels its in-process mock jobs; a crash does not magically resume them.
 
-You need one `OPENAI_API_KEY` with access to `gpt-live-1`, `gpt-6-luna` and
-`gpt-transcribe`. Access and pricing are account/model dependent. No other cloud
-credential, GPU, web service or UI is required.
+Here is what happens when you say **“Hey Spot, pick up the red sock”**:
 
-Install PortAudio for microphone/speaker use:
+1. **Check for a wake phrase.** Local speech detection identifies an utterance. In
+   the default mode, OpenAI transcribes it and Python checks for “Hey Spot”. This is
+   not a fully local keyword detector.
+2. **Open a conversation.** GPT-Live receives the complete opening utterance once
+   as text, so you can say the wake phrase and command in one breath. Subsequent
+   microphone audio is streamed normally; generated speech plays through your output.
+3. **Request a tool, not direct movement.** GPT-Live delegates action requests to
+   its managed Luna backend. The backend selects tools; Python checks their arguments,
+   prevents duplicate actions and rejects conflicting jobs.
+4. **Run the job separately.** The mock task runner starts the pickup and reports
+   acceptance immediately. You can keep talking while it works. “Accepted” does not
+   mean “finished”; completion comes from the runner, not the model's narration.
+5. **Sleep and remember.** Voice closes after an idle period or an explicit sleep
+   request. Events and transcripts are saved, and summaries are generated in the
+   background. The next wake receives current task state and up to ten memory slices
+   from the current local day. If a summary is not ready, saved events provide a fallback.
 
-| OS | Setup |
+> **Privacy:** in the default wake mode, nearby speech can be uploaded for
+> transcription **before a wake phrase is found**. Standby means the live conversation
+> is closed—not that the microphone is off or all cloud use has stopped. Keyboard
+> wake mode avoids standby transcription.
+
+## Why these features exist
+
+| Feature | The problem it solves |
 | --- | --- |
-| Debian/Ubuntu | `sudo apt install libportaudio2` (development headers only needed for source builds) |
-| macOS | `brew install portaudio`; allow microphone permission for your terminal |
-| Windows | `sounddevice` pip wheels normally include PortAudio; allow microphone access |
+| **Independent jobs** | A chat timeout or voice disconnect should not abort an already accepted task. |
+| **Wake phrase + idle sleep** | You should not have to leave a paid live conversation connected all day. |
+| **Whole opening command** | “Hey Spot, do this” should work without repeating the request after connection. |
+| **Validated, deduplicated tools** | A model retry must not run the same action twice; malformed arguments must not reach the runner. |
+| **Explicit cancellation and guidance** | Talking over the assistant is not a stop command. You can explicitly cancel a job or adjust a running walking policy. |
+| **SQLite history + daily memory** | The next conversation should know what happened without pretending the model remembers everything. |
+| **Bounded buffers and local budgets** | Slow connections should fail visibly rather than execute a truncated command or reconnect indefinitely. |
 
-The intended public repository is `https://github.com/dctanner/robot-voice`.
-The clone steps below are usable after publication; release review does not itself
-create or publish the repository.
+The default idle timeout is **30 seconds**. Speech, replies and pending tool work can
+hold the session open; a running job can extend the idle hold to **120 seconds** by
+default. Jobs still do not require the voice session to remain open.
 
-With [uv](https://docs.astral.sh/uv/):
+## 1. Try it without an API key
 
-```sh
-git clone https://github.com/dctanner/robot-voice.git
-cd robot-voice
-uv venv --python 3.12
-# Linux: install CPU-only PyTorch first to avoid unnecessary CUDA packages.
-uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-uv pip install -e '.[vad,dev]'
-cp .env.example .env
-chmod 600 .env             # Unix; restrict ACLs on Windows instead
-# Edit .env locally: OPENAI_API_KEY=your-key
-uv run --no-project robot-voice doctor
-uv run --no-project robot-voice devices
-uv run --no-project robot-voice run --audio-mode headphones
-```
-
-On macOS/Windows you may omit the CPU-index step and let the `vad` extra install
-PyTorch. Without uv:
+Start here to check installation. **No microphone, speaker, GPU or API key is needed.**
+Use Python 3.12; commands below are for Linux/macOS.
 
 ```sh
 git clone https://github.com/dctanner/robot-voice.git
 cd robot-voice
 python3.12 -m venv .venv
-. .venv/bin/activate       # Windows: .venv\Scripts\activate
-python -m pip install --upgrade pip
-# Same optional Linux CPU-only PyTorch step as above, using python -m pip.
-python -m pip install -e '.[vad,dev]'
+source .venv/bin/activate
+python -m pip install -e .
+robot-voice demo
+```
+
+On Windows PowerShell, create the environment with `py -3.12 -m venv .venv` and
+activate it with `.\.venv\Scripts\Activate.ps1`; the pip and CLI commands are the same.
+If you use [uv](https://docs.astral.sh/uv/), `uv venv --python 3.12` can create the
+same environment, and `uv pip install -e .` can install the package.
+
+The demo runs a simulated pickup, checks that its duplicate is not executed, and
+shows saved memory. Look for `"task_state":"succeeded"` and
+`"duplicate_executions":0`. **It makes zero cloud requests and does not demonstrate
+voice input or output.**
+
+For a repeatable demo, choose a new database path:
+
+```sh
+robot-voice --database .robot-voice/demo-1.sqlite3 demo
+```
+
+## 2. Use your microphone
+
+This mode makes **paid cloud requests**. You need a microphone, an audio output,
+and one `OPENAI_API_KEY` with access to `gpt-live-1`, `gpt-6-luna` and
+`gpt-transcribe`. Access and prices depend on your account. Start with headphones
+so speaker audio does not feed back into the microphone.
+
+### Install audio support
+
+| OS | PortAudio setup |
+| --- | --- |
+| Debian/Ubuntu | `sudo apt install libportaudio2` |
+| macOS | `brew install portaudio`; allow microphone access for your terminal |
+| Windows | `sounddevice` wheels normally include PortAudio; allow microphone access |
+
+In the activated environment, install the local speech detector:
+
+```sh
+# Linux: install CPU-only PyTorch to avoid unnecessary CUDA packages.
+# On macOS/Windows, skip this line and let the vad extra install PyTorch.
+python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e '.[vad]'
+```
+
+### Configure your key privately
+
+```sh
 cp .env.example .env
-chmod 600 .env             # Unix; restrict ACLs on Windows instead
-# Edit .env locally: OPENAI_API_KEY=your-key
+# Edit .env locally and replace the placeholder with your OpenAI API key.
+```
+
+Copy the file only once—do not overwrite an existing key. On Linux/macOS, run
+`chmod 600 .env`; on Windows, restrict its file permissions. `.env` is ignored by
+Git. Never put the key in TOML settings, command arguments, issues or conversation logs.
+Existing environment variables take precedence over `.env`.
+
+### Check devices, then start talking
+
+```sh
 robot-voice doctor
+robot-voice devices
+robot-voice run --wake-mode keyboard --audio-mode headphones
+```
+
+`doctor` makes no paid calls. It checks key **presence**, packages and audio-device
+support—not whether your key works or echo cancellation is effective. Fix its audio
+or missing-package errors before proceeding.
+
+In keyboard mode, **press Enter, wait for `ACTIVE`, then speak**. This lets you check
+audio before adding wake-phrase detection. To use “Hey Spot” instead, exit with
+Ctrl+C and start:
+
+```sh
 robot-voice run --audio-mode headphones
 ```
 
-Dotenv loads `.env` without overwriting existing environment variables. Never put
-keys in TOML, command-line arguments, issues, exported sessions or commits.
-`doctor` is offline: it reports key **presence**, package/device availability and
-format support, not credential validity. A missing VAD extra or PortAudio library
-is an actionable diagnostic, not a passed audio test.
+Say the full opening request, for example **“Hey Spot, pick up the red sock on the
+floor.”** The chime means the wake was detected; `ACTIVE` means the connection is
+ready. You do not need to repeat the opening request.
 
-For a quick **zero-cloud, no-audio** check, install just `'.[dev]'` and run:
+## A conversation to try
+
+These are requests to a **simulation**, not commands to a physical robot:
+
+| Say | What to expect |
+| --- | --- |
+| “Hey Spot, walk for four minutes.” | A mock walking job starts; conversation remains available. |
+| “What are you doing?” | The assistant queries the runner's current state. |
+| “Walk more slowly.” | The backend can update the running policy's simulated speed. |
+| “Go to sleep.” | Voice closes; the walking job remains independent. |
+| “Hey Spot, are you still walking?” | A new session checks current task state and loads today's memory. |
+| “Cancel the walking task.” | Cancellation is requested and acknowledged by the runner. |
+
+You can also request simulated navigation, pickup and expressions. There is no
+camera: scene descriptions are mock data, not observations of your room. Switching
+between conflicting movement jobs requires acknowledged cancellation first.
+
+**Sleep, cancel and quit are different:** sleep closes voice; cancellation targets
+a job; Ctrl+C shuts down the application and its mock jobs. Voice “stop” is never a
+safety-rated emergency stop.
+
+## Settings you will probably change
 
 ```sh
-robot-voice demo
-python -m pytest -q
-```
-
-`demo` demonstrates one deduplicated pickup job and pending-summary memory; it does
-not synthesize speech or imitate a successful cloud connection. Use a fresh database
-for a repeatable demo: `robot-voice --database .robot-voice/demo.sqlite3 demo`.
-
-## Conversation and CLI
-
-```sh
-robot-voice run --wake-phrase "hey spot" --idle-timeout 30 --audio-mode headphones
-robot-voice run --wake-mode keyboard --audio-mode headphones
+robot-voice run --wake-phrase "hello robot" --idle-timeout 45 --audio-mode headphones
 robot-voice --config examples/config.toml run
 ```
 
-Try: “Hey Spot, pick up the red sock on the floor.” Then ask what it is doing,
-request navigation to the kitchen, or ask for the simulated scene. During a walking
-policy, ask for lower speed or cancellation. A destination switch must acknowledge
-cancellation before starting conflicting movement. “Go to sleep” closes voice,
-**not the robot job**. Ctrl+C exits the application and cancels its in-process mock
-jobs. After a crash, outstanding mock jobs are marked interrupted, never falsely
-reported as having kept running. An already-dispatched cancellation still waits for
-robot acknowledgement and durably records its result if voice closes; undispatched
-work remains rejected after close commitment.
+Global `--config` and `--database` options go **before** the command. See the
+[example config](examples/config.toml) and [all settings](robot_voice/config.py).
 
-The local chime means **wake detected**, not connection ready. The CLI distinguishes
-CONNECTING, ACTIVE and STANDBY. Keyboard mode wakes on Enter; speak after waking.
-Global `--config` and `--database` options go **before** the command.
+| Setting | Default / guidance |
+| --- | --- |
+| Wake phrase | `hey spot`; keyboard wake is available for manual testing. |
+| Audio mode | `half-duplex` by default: microphone forwarding is silenced during playback, so you cannot interrupt by speaking. The examples select `headphones`. |
+| Speaker use | `external-aec` requires a real OS/hardware echo-cancelled input and matching output. PortAudio does not provide automatic echo cancellation. |
+| Maximum live session | 300 seconds. |
+| Per-process limits | 1,200 active voice seconds, 100 cloud requests and a $4.50 local estimated-cost cutoff. These reset when the application restarts. |
+| History | `.robot-voice/voice.sqlite3`; local timezone determines “today”. |
 
-### Audio modes
+**Muting does not stop live-session billing.** Budget estimates are not a provider
+billing cap. Recheck [current pricing](https://developers.openai.com/api/docs/pricing)
+before use. No automatic paid reconnect occurs after a network loss.
 
-| Mode | Intended setup | Limitation |
-| --- | --- | --- |
-| `half-duplex` (default) | Speakers without an established AEC path | Mic forwarding becomes silence during playback/chimes. **No barge-in**; not full duplex. |
-| `headphones` | Headset or well-isolated headphones | Sends input while output plays; echo isolation is your responsibility. |
-| `external-aec` | OS/hardware echo-cancelled input, explicitly selected | Full-duplex transport is available, but AEC must actually include the selected speaker output **and chime** as its reference. |
+For device selection, optional local keyword models, precise timeout behavior and
+cost accounting, see the [advanced guide](docs/OPERATIONS.md).
 
-```sh
-robot-voice devices
-robot-voice run --audio-mode external-aec \
-  --input-device "Your echo-cancelled source" --output-device "Your speakers"
-```
+## Read or delete saved history
 
-PortAudio does **not** supply automatic echo cancellation. VAD and noise suppression
-are not substitutes. On Linux, configure an OS echo-cancel source/sink pair (for
-example PipeWire's echo-cancel module) and select the matching input **and output**;
-selecting a name containing “echo” proves nothing. Test with low volume, then actual
-speakers, checking for feedback/self-wakes and overlapping speech. No OS AEC setup is
-installed or certified by this project.
-
-The Live wire format is mono PCM16 at **16 kHz**. Input devices at other supported
-rates can use `hardware_rate` in TOML; a stateful linear resampler supplies 16 kHz.
-The selected output device must accept 16 kHz. This is speech-prototype resampling,
-not a high-quality audio production pipeline. Callback queues only move PCM; cloud
-calls, SQLite and inference run outside PortAudio callbacks.
-
-Standby transcription uploads **nearby speech even without a wake phrase**. A TV or
-recording saying the phrase can wake it; this is not speaker identification. Clips
-are at most 15s, assembled utterances at most 45s, with bounded overlap and queues.
-Long split-clip transcription remains approximate. Non-wake text is discarded locally.
-Genuinely new speech during an idle close is retained for a follow-on session in the
-default transcription wake mode, provided the preceding captured utterance ended.
-Duration/error closes, explicit sleep, or an incomplete capture boundary discard the
-remaining speech through 0.6s of continuous silence and visibly request a fresh wake.
-Other wake modes still require their wake trigger; discarded audio is not replayed.
-
-### Optional local keyword mode
-
-Install `'.[keyword]'`, provide your own compatible licensed ONNX acoustic model in
-`keyword_model`, and choose `wake_mode = "keyword"`. No standby transcription is
-used in that mode; detection runs continuously, not behind VAD. The last three
-seconds of audio are replayed **at 1×** after startup, so backlog remains latency.
-This adapter is unvalidated with real rooms/models. No custom “Hey Spot” model ships.
-Check openWakeWord's code and pretrained-model licenses separately; included models
-are not automatically licensed for commercial deployment.
-
-## Configuration, costs and privacy
-
-Copy [examples/config.toml](examples/config.toml), then set only what you need.
-Unknown settings and invalid limits are rejected. Defaults and types live in
-[`config.py`](robot_voice/config.py). Useful controls:
-
-- `idle_timeout=30`, `reply_grace=5`, `task_hold_max_seconds=120`
-- `keep_open_while_task_running=true`; the hold is anchored to the user-idle episode,
-  not refreshed by progress or newly chained jobs
-- `max_session_seconds=300`, `max_active_seconds=1200`, `max_cloud_requests=100`
-- `budget_dollars=4.5`; `backend_timeout=30`, `close_timeout=8`
-- `startup_seconds=10`, `timezone` (system IANA zone by default), `wake_chime=true`
-- model names, selected devices and `database` (default `.robot-voice/voice.sqlite3`)
-
-These are **application-local estimates and limits, not a provider billing cap**.
-The budget resets when the application process restarts. It reserves $0.10 for each
-unresolved request; uncertainty is not silently charged as zero. Session silence,
-waiting and muted input still cost money. SDK automatic retries are disabled;
-summary retries are capped. No automatic paid reconnect occurs after a network loss.
-
-Default estimates use Live $0.05/active minute, transcription $0.0045/submitted
-minute, and standard Luna $0.10/M input, $0.50/M output (including reasoning),
-$0.01/M cached input and $0.125/M cache writes. **Recheck pricing before use or
-changing models.** Fixture TTS uses a $0.02/minute *estimate*; its published rates
-are token-based. The default `gpt-4o-mini-tts` fixture generator is configurable and
-marked deprecated upstream; it is not required for normal microphone operation.
-See [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
-
-Live usage updates replace previous cumulative values; backend usage is deduplicated
-by response ID. Only `session.closed` confirms final voice usage. A lost connection
-is labeled unconfirmed with a wall-time estimate. This is not an invoice reconciliation
-or a guarantee against unexpected provider billing.
-
-Cloud audio/text is subject to your provider/account retention policies. Live
-recording storage and standalone summary Responses storage are disabled, which
-**does not imply zero provider retention**. SQLite stores private conversation text,
-arguments, results and approximate transcript fragments. No raw audio is recorded by
-`run`; synthetic test fixtures and evidence are saved separately under ignored local
-runtime directories. Playback counters measure submitted samples, not proof a person
-heard particular words. Transcripts may overlap and are not complete turns.
-
-### Inspect, export and delete
+Stop the running application before maintenance commands:
 
 ```sh
 robot-voice history --today
 robot-voice export --session SESSION_ID --format text
-robot-voice export --session SESSION_ID --format json > .robot-voice/private-session.json
-robot-voice export --session SESSION_ID --format jsonl > .robot-voice/private-session.jsonl
 robot-voice delete --session SESSION_ID --yes
-robot-voice delete --before 2026-01-01T00:00:00+00:00 --yes
 ```
 
-**Exports are private.** Best-effort redaction checks dictionary keys and complete
-string values and omits audio payloads; it is not an absolute credential-removal
-guarantee or a personal-data scrubber. In particular, credentials split across
-transcript fragments can survive and be reconstructed when fragments are joined:
-streaming credential redaction is not implemented. Do not speak credentials or
-commit logs/exports. Use a private output directory.
-Storage uses SQLite foreign keys/WAL, owner-only database permissions on Unix, and
-an exclusive runtime lock. Maintenance commands require the runner to be stopped.
-No automatic retention deletion runs: use `delete --before` on your schedule.
-Deletion cascades session records and associated task history and vacuums SQLite;
-filesystem snapshots, backups, provider retention and independently stored synthetic
-fixtures are not erased. Usage-only request records without a session are retained;
-remove the stopped runtime directory for a complete local reset.
+Replace `SESSION_ID` with an ID from `history`. The database and exports contain
+private conversation text and tool details. Normal microphone operation does not
+save raw audio, but the cloud provider's retention rules still apply. Redaction is
+best effort, **not** a guarantee that credentials or personal data are removed.
+Never commit `.env`, databases, recordings or exports. Local deletion does not erase
+backups or provider-held data. See [security guidance](SECURITY.md) and the
+[storage details](docs/OPERATIONS.md#inspect-export-and-delete).
 
-Recall selects up to ten current-local-day slices, chronologically injected within
-a ~9,000-character prompt budget. Calendar midnight is converted to UTC; DST days
-are not treated as fixed 24-hour intervals. Cross-midnight sessions are sliced by
-UTC event timestamps; a changed timezone derives new extractive slices from evidence.
-Summaries are generated in the configured worker timezone, with fallback after a
-zone change. Current task facts can cross midnight; yesterday's conversation does not.
-Memory, summaries and tool strings are data, **never permissions or executable policy**.
+## What was tested
 
-## Development and verification
+| Evidence | What it does—and does not—show |
+| --- | --- |
+| **143 offline tests** | Latest lifecycle and request-identity fixes pass deterministic tests. Lint, type checks, builds and a clean wheel installation also passed. |
+| **Real API + synthesized speech** | 15 sessions and 29.87 active minutes, including failed diagnostics. A 10m32s continuous session, tool use and next-wake recall passed on an earlier revision. |
+| **Revision boundary** | A later 19-second API smoke validated the first review fixes. The final fixes were tested offline, not with another live smoke or soak. |
+| **Not verified** | Real microphone/speaker operation, echo cancellation, interruption while speaking, and room wake accuracy. No physical robot was tested. |
+
+See the [full verification report](docs/VERIFICATION.md) for results, failures and
+estimated costs. Synthetic-audio success is **not** proof of a working laptop-speaker
+setup. The [original design](ROBOT_VOICE_PLAN.md) also contains future work, not just
+implemented or hardware-tested features.
+
+## Develop and extend
 
 ```sh
-python -m pytest -q                  # deterministic; no paid calls or hardware
+python -m pip install -e '.[dev]'
+python -m pytest -q
 ruff check robot_voice tests
 ruff format --check robot_voice tests
 mypy robot_voice
 python -m build
 ```
 
-The OpenAI SDK version is pinned, but transitive dependencies and build tools are
-not locked; exact environment reproduction is not guaranteed.
+No GitHub Actions workflows are included. The tests above are offline; paid synthetic
+cloud tests require explicit `live-test --allow-paid` opt-in. Follow the
+[testing instructions](docs/OPERATIONS.md#development-and-verification), rather than
+substituting a room recording.
 
-Cloud tests are explicit and synthetic only; **never substitute a room recording**:
+The main pieces are [`supervisor.py`](robot_voice/supervisor.py) (voice lifecycle),
+[`voice/`](robot_voice/voice/) (provider transport), [`tools/`](robot_voice/tools/)
+(validation), [`robot/`](robot_voice/robot/) (mock jobs), and
+[`memory/`](robot_voice/memory/) (history and summaries). To add tools or replace the
+mock adapter, read the [extension contracts](docs/OPERATIONS.md#extending-it).
+A real controller must own arbitration, collision avoidance, watchdogs and emergency
+stopping; swapping adapters does not make this prototype safe for hardware.
 
-```sh
-robot-voice live-test --allow-paid --seconds 35 --cycles 1 \
-  --startup-delay .5 --output .robot-voice/smoke
-# One continuous session exceeding 10 active minutes; use a foreground timeout.
-robot-voice live-test --allow-paid --seconds 650 --cycles 1 \
-  --startup-delay 3 --output .robot-voice/soak
-# Separate close/wake, long-job, steering and cancellation regression:
-robot-voice live-test --allow-paid --seconds 135 --cycles 3 \
-  --startup-delay 3 --output .robot-voice/multi-cycle
-```
-
-Use a **new output directory** for each campaign. The harness generates/reuses TTS
-fixtures, transcribes the opening wake command, sends subsequent PCM at 1×, and
-writes private SQLite evidence plus `report.json`. It never opens an audio device;
-output is accounted for but discarded. It checks first-command pickup/finalization,
-ordinary idle closure, summary completion, protocol errors and minimum duration for long runs. Inspect tool results, close reasons, summaries
-and the report; absence of an exception alone is not proof of every behavior.
-There are finite request/token/time/duration caps and no infinite retries. Aggregate
-limits across multiple invocations are **your responsibility**. Use a foreground
-wall-time timeout for manual paid testing. No GitHub Actions workflows are included;
-run the checks above locally.
-
-### Extending it
-
-| Seam | Contract |
-| --- | --- |
-| `audio/frontend.py:AudioFrontend` | Ordered sample-indexed `Frame`s; report loss, never hide it |
-| `wake/base.py` | Speech and explicit wake interfaces; never treat VAD as identity |
-| `voice/base.py:VoiceProvider` | Capabilities distinguish duplex, images and paced audio; `begin_close()` synchronously closes tool admission |
-| `robot/base.py:RobotAdapter` | Validate and run bounded jobs; real controllers must own safety |
-| `memory/summaries.py:SummaryProvider` | Structured, attributable historical data, no actions |
-
-Add a tool's strict JSON schema and description in `tools/registry.py`, validation
-and dispatch in `tools/gateway.py`, and robot behavior/resource requirements in
-`robot/`. Test duplicate provider calls and application operation identities,
-resource conflicts, cancellation acknowledgement, stale versions and failures.
-Queries may refresh state; repeated side effects in the same utterance use recursively
-key-sorted operation identities. A new utterance requires at least 0.6 seconds of
-contiguous captured silence; brief VAD dropouts do not reset its identity. Backend
-delegations and responses retain their originating identity even when their function
-items arrive during newer speech. Late correlation inherits an already-known identity;
-conflicting established identities close the voice session rather than guessing.
-Non-finite numbers are rejected before storage or
-dispatch. A known pre-execution resource conflict may be retried with a new provider
-call after cancellation; the original provider call remains deduplicated. Closing
-voice synchronously shuts tool admission before terminal events are drained.
-Unknown outcomes are never automatically replayed. Intentional new utterances can
-repeat a completed action.
-
-The current transport is **GPT-Live WebSocket**, not the older Realtime protocol.
-Function calls arrive inside `response.event` → `response.output_item.done`;
-lifecycle snapshots have empty output arrays. Results use `response.item.create`
-then one `response.create` continuation. Job completion is a new session-wide
-commentary update with `delegation_id: null`, not a second function result. Output
-PCM includes silence and has no voice-turn-done marker: speech/queue quiet guards
-are heuristic. A real robot integration additionally needs robot-owned arbitration,
-watchdogs, collision avoidance, disconnect policy and a physical emergency stop.
-Voice “stop” is never a safety-rated stop.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and the [MIT license](LICENSE).
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
